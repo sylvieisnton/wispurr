@@ -205,7 +205,7 @@ func (s *wispStream) handleConnect(streamType uint8, port string, hostname strin
 				s.close(closeReasonNetworkError)
 				return
 			}
-			s.conn, err = dialer.Dial("tcp", net.JoinHostPort(s.hostname, port))
+			s.conn, err = dialer.Dial("tcp", destination)
 		} else {
 			s.conn, err = cfg.Dialer.Dial("tcp", destination)
 		}
