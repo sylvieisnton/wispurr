@@ -4,20 +4,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/lxzan/gws"
-)
-
-const (
-	defaultStreamLimitPerHost    = 512
-	defaultStreamLimitTotal      = 16384
-	defaultMaxConnectsPerSecond  = 20
-	defaultConnectionsLimitPerIP = 120
-	defaultHandshakeFailures     = 10
 )
 
 func (cfg *Config) InitResolver() {
@@ -47,47 +40,24 @@ func (cfg *Config) InitResolver() {
 	}
 }
 
-func (cfg *Config) BuildGlobals() {
-	if cfg.Globals != nil {
-		return
+func NewWispHandler(config *Config) (http.HandlerFunc, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
-	g := &Globals{Egress: PolicyFromConfig(cfg)}
-	if cfg.FloodProtection != nil && cfg.FloodProtection.Enabled {
-		fp := cfg.FloodProtection
-		if fp.MaxConnectsPerSourceIPPerSecond > 0 {
-			g.PerSource = NewSlidingWindow(fp.MaxConnectsPerSourceIPPerSecond, time.Second)
-		}
-		if fp.MaxConnectsPerDestPerSecond > 0 {
-			g.PerDestSec = NewSlidingWindow(fp.MaxConnectsPerDestPerSecond, time.Second)
-		}
-		if fp.MaxConnectsPerDestPerMinute > 0 {
-			g.PerDestMin = NewSlidingWindow(fp.MaxConnectsPerDestPerMinute, time.Minute)
-		}
-		if fp.MaxInFlightSyns > 0 {
-			g.InFlightSyns = NewSemaphore(fp.MaxInFlightSyns)
-		}
-		if fp.MaxConcurrentConnections > 0 {
-			g.Connections = NewSemaphore(fp.MaxConcurrentConnections)
-		}
-		g.Signature = NewSignatures(SignatureConfig{
-			Enabled:              fp.SynFloodSignature.Enabled,
-			Window:               time.Duration(fp.SynFloodSignature.WindowMs) * time.Millisecond,
-			MinSamples:           fp.SynFloodSignature.MinSamples,
-			FailedHandshakeRatio: fp.SynFloodSignature.FailedHandshakeRatio,
-		})
-	}
-	if cfg.Reputation != nil && cfg.Reputation.Enabled {
-		rc := *cfg.Reputation
-		if rc.EvictAfter == 0 && rc.EvictDays > 0 {
-			rc.EvictAfter = time.Duration(rc.EvictDays) * 24 * time.Hour
-		}
-		g.Reputation = NewReputation(rc)
-		_ = g.Reputation.Load()
-	}
-	cfg.Globals = g
+	return createWispHandler(config), nil
 }
 
 func CreateWispHandler(config *Config) http.HandlerFunc {
+	handler, err := NewWispHandler(config)
+	if err == nil {
+		return handler
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "invalid Wisp server configuration", http.StatusInternalServerError)
+	}
+}
+
+func createWispHandler(config *Config) http.HandlerFunc {
 	config.InitResolver()
 	config.BuildGlobals()
 
@@ -111,6 +81,28 @@ func CreateWispHandler(config *Config) http.HandlerFunc {
 	})
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			if config.NonWSResponse == "" {
+				w.WriteHeader(http.StatusUpgradeRequired)
+				return
+			}
+			_, _ = w.Write([]byte(config.NonWSResponse))
+			return
+		}
+
+		var trusted []*net.IPNet
+		if config.ParseRealIP {
+			trusted = config.trustedProxyNets
+		}
+		remoteIP := ResolveClientIP(r, trusted, config.TrustedHeaders)
+		if config.Globals != nil && config.Globals.ConnectionRate != nil && !config.Globals.ConnectionRate.Allow(remoteIP.String()) {
+			w.Header().Set("Retry-After", strconv.Itoa(config.ConnectionWindowSeconds))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+
 		if config.Globals != nil && config.Globals.Connections != nil {
 			if !config.Globals.Connections.TryAcquire() {
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -138,17 +130,11 @@ func CreateWispHandler(config *Config) http.HandlerFunc {
 		netConn := wsConn.NetConn()
 
 		if tc, ok := netConn.(*net.TCPConn); ok {
-			tc.SetReadBuffer(4 << 20)
-			tc.SetWriteBuffer(4 << 20)
-			tc.SetNoDelay(true)
+			_ = tc.SetReadBuffer(config.SocketBufferSize)
+			_ = tc.SetWriteBuffer(config.SocketBufferSize)
+			_ = tc.SetNoDelay(true)
 		}
 		setTCPLowLatency(netConn)
-
-		var trusted []*net.IPNet
-		if config.ParseRealIP {
-			trusted = config.trustedProxyNets
-		}
-		remoteIP := ResolveClientIP(r, trusted, config.TrustedHeaders)
 
 		wc := &wispConnection{
 			netConn:       netConn,
@@ -161,8 +147,12 @@ func CreateWispHandler(config *Config) http.HandlerFunc {
 			connID:        atomic.AddUint64(&connIDCounter, 1),
 			pendingWrites: make([]writeReq, 0, 16),
 		}
+		if wc.globals != nil {
+			wc.globals.active.Store(wc.connID, wc)
+		}
 
 		if useV2 {
+			_ = wc.netConn.SetReadDeadline(time.Now().Add(time.Duration(config.HandshakeTimeoutSeconds) * time.Second))
 			go wc.v2Handshake()
 		} else {
 			wc.sendPacket(0, config.BufferRemainingLength)

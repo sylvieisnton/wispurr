@@ -10,6 +10,7 @@ const (
 	levelInfo
 	levelWarn
 	levelError
+	levelNone
 )
 
 func newLogger(level string) Logger {
@@ -23,6 +24,8 @@ func newLogger(level string) Logger {
 		lvl = levelWarn
 	case "error":
 		lvl = levelError
+	case "none":
+		lvl = levelNone
 	}
 	return &Log{level: lvl, inner: log.Default()}
 }

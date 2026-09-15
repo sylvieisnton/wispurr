@@ -117,7 +117,7 @@ keys:
 
 ## Credits
 
-- [soap phia](https://github.com/soap-phia/) – Writing mrrowisp
+- [soap phia](https://github.com/sylvieisnton/) – Writing mrrowisp
 - [Amplify](https://github.com/not-amplify/) – Adding protections against flooding
 
 ## License

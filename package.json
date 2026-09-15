@@ -2,12 +2,12 @@
 	"name": "mrrowisp",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/soap-phia/mrrowisp"
+		"url": "git+https://github.com/sylvieisnton/mrrowisp.git"
 	},
-	"version": "3.1.7",
+	"version": "3.9.9",
 	"module": "index.ts",
 	"type": "module",
-	"author": "soap-phia",
+	"author": "sylvieisnton",
 	"license": "BSD-3-Clause",
 	"private": false,
 	"main": "dist/index.js",

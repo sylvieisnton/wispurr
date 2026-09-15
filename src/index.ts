@@ -1,117 +1,14 @@
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { binPath, configPath } from "./path.js";
 import * as fs from "node:fs";
 import { detect } from "detect-port";
-import logger from "./logger.js";
+import { Logger } from "./logger.js";
 import { request, type IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
+import { createInterface } from "node:readline";
+import type { MrrowispConfig, MrrowispOptions } from "./config.js";
 
-type PortEntry = number | [number, number];
-
-type FilterList = {
-	hostnames: string[];
-	ports: PortEntry[];
-};
-
-type FloodProtectionConfig = {
-	enabled: boolean;
-	maxConnectsPerSourceIPPerSecond?: number;
-	maxConnectsPerDestPerSecond?: number;
-	maxConnectsPerDestPerMinute?: number;
-	maxInFlightSyns?: number;
-	maxConcurrentStreamsPerConnection?: number;
-	maxConcurrentConnections?: number;
-	synFloodSignature?: {
-		enabled: boolean;
-		windowMs: number;
-		minSamples: number;
-		failedHandshakeRatio: number;
-	};
-	wsCloseAfterViolations?: number;
-	logBlockedDials?: boolean;
-};
-
-type ReputationConfig = {
-	enabled: boolean;
-	storePath?: string;
-	saveIntervalSeconds?: number;
-	scoreDecayPerHour?: number;
-	evictAfterDays?: number;
-	thresholds?: { warn: number; throttle: number; strict: number };
-	weights?: Record<string, number>;
-	destinationWeights?: Record<string, number>;
-};
-
-type MrrowispConfig = {
-	/** TCP port the server listens on. */
-	port: number | number[];
-	/** Allow clients to open TCP streams. */
-	allowTCP: boolean;
-	/** Allow clients to open UDP streams. */
-	allowUDP: boolean;
-	/** Allow direct connections to IP addresses. */
-	allowDirectIP: boolean;
-	/** Allow connections to private/local IP ranges. */
-	allowPrivateIPs: boolean;
-	/** Allow connections to loopback IP addresses. */
-	allowLoopbackIPs: boolean;
-	/** Size of the TCP stream buffer in bytes. */
-	tcpBufferSize: number;
-	/** Bytes of unacked data tolerated before backpressure. */
-	bufferRemainingLength: number;
-	/** Enable TCP_NODELAY on TCP sockets. */
-	tcpNoDelay: boolean;
-	/** Hostname and port blacklist rules. */
-	blacklist: FilterList;
-	/** Hostname and port whitelist rules. */
-	whitelist: FilterList;
-	/** Enable WebSocket permessage-deflate extension. */
-	websocketPermessageDeflate: boolean;
-	/** DNS servers used for hostname resolution. */
-	dnsServers: string[];
-	/** DNS resolution method. */
-	dnsMethod: "lookup" | "resolve";
-	/** Preferred ordering for resolved IP addresses. */
-	dnsResultOrder: "ipv4first" | "ipv6first" | "verbatim";
-	/** Enable TWisp experimental protocol. */
-	enableTwisp: boolean;
-	/** Enable Wisp v2 protocol support. */
-	enableV2: boolean;
-	/** Message of the day sent during handshake. */
-	motd: string;
-	/** Enable password authentication. */
-	passwordAuth: boolean;
-	/** Require password authentication for all clients. */
-	passwordAuthRequired: boolean;
-	/** Username/password credential map. */
-	passwordUsers: Record<string, string>;
-	/** Parse reverse-proxy real IP headers. */
-	parseRealIP: boolean;
-	/** CIDRs/IPs whose forwarded headers are trusted. */
-	trustedProxies: string[];
-	/** Header names to honor from trusted proxies. */
-	trustedHeaders: string[];
-	/** HTTP response returned for non-WebSocket requests. */
-	nonWSResponse: string;
-	/** Logging verbosity level. */
-	logLevel: "debug" | "info" | "warn" | "error" | "none";
-	/** Optional upstream proxy URL (SOCKS/HTTP). */
-	proxy: string;
-	/** Maximum WebSocket message size in bytes. */
-	maxMessageSize: number;
-	/** Directory for static file serving. */
-	staticDir: string;
-	/** Bandwidth limit per IP in Kbps. */
-	bandwidthLimitKbps: number;
-	/** Connection rate limit per IP. */
-	connectionsLimitPerIP: number;
-	/** Connection rate limit window in seconds. */
-	connectionWindowSeconds: number;
-	/** Flood-protection options. */
-	floodProtection: FloodProtectionConfig;
-	/** IP reputation options. */
-	reputation: ReputationConfig;
-};
+export type { MrrowispConfig, MrrowispOptions } from "./config.js";
 
 type Process = Array<{
 	process: ChildProcess;
@@ -127,7 +24,8 @@ function loadDefaultConfig(): MrrowispConfig {
 		return cachedDefaultConfig as MrrowispConfig;
 	} catch (err) {
 		throw new Error(
-			`mrrowisp: failed to read bundled config at ${configPath}. `
+			`mrrowisp: failed to read bundled config at ${configPath}`,
+			{ cause: err },
 		);
 	}
 }
@@ -135,39 +33,87 @@ function loadDefaultConfig(): MrrowispConfig {
 export class Mrrowisp {
 	config: MrrowispConfig;
 	processes: Process | undefined;
-	private reqIndex: number = 0;
+	private reqIndex = 0;
 	private processPorts: number[] = [];
+	private readonly logger: Logger;
 
-	constructor(config?: Partial<MrrowispConfig>) {
-		this.config = loadDefaultConfig();
+	get isRunning(): boolean {
+		return Boolean(this.processes?.length);
+	}
+
+	get ports(): readonly number[] {
+		return [...this.processPorts];
+	}
+
+	constructor(config?: MrrowispOptions) {
+		this.config = structuredClone(loadDefaultConfig());
 		this.processes = undefined;
 		if (config) {
-			this.config = { ...this.config, ...config };
+			this.config = {
+				...this.config,
+				...config,
+				blacklist: { ...this.config.blacklist, ...config.blacklist },
+				whitelist: { ...this.config.whitelist, ...config.whitelist },
+				floodProtection: {
+					...this.config.floodProtection,
+					...config.floodProtection,
+					synFloodSignature: {
+						...this.config.floodProtection.synFloodSignature,
+						...config.floodProtection?.synFloodSignature,
+					} as NonNullable<MrrowispConfig["floodProtection"]["synFloodSignature"]>,
+				},
+				reputation: {
+					...this.config.reputation,
+					...config.reputation,
+					thresholds: {
+						...this.config.reputation.thresholds,
+						...config.reputation?.thresholds,
+					} as NonNullable<MrrowispConfig["reputation"]["thresholds"]>,
+					weights: { ...this.config.reputation.weights, ...config.reputation?.weights },
+					destinationWeights: {
+						...this.config.reputation.destinationWeights,
+						...config.reputation?.destinationWeights,
+					},
+				},
+			};
 		}
-		logger.level = this.config.logLevel;
+		this.logger = new Logger(this.config.logLevel);
 	}
 
 	async getAvailablePort(port: number): Promise<number> {
-		if ((await detect(port)) !== port) {
-			logger.error(`port ${port} is not available!! >w<`);
-			return this.getAvailablePort(port + 1);
+		for (let candidate = port; candidate <= 65535; candidate++) {
+			if (!this.processPorts.includes(candidate) && (await detect(candidate)) === candidate) {
+				return candidate;
+			}
 		}
-		return port;
+		throw new Error(`mrrowisp: no available port at or above ${port}`);
 	}
 
 	async start(count: number = 1) {
+		if (!Number.isInteger(count) || count < 1) {
+			throw new RangeError("mrrowisp: worker count must be a positive integer");
+		}
+		if (this.processes?.length) {
+			throw new Error("mrrowisp: already running; stop it before starting again");
+		}
 		this.processes = [];
 		this.processPorts = [];
 
 		for (let i = 0; i < count; i++) {
-			if (Array.isArray(this.config.port) ? !this.config.port[i] : !this.config.port) {
-				logger.error("mrrowisp: port is not configured!! >w<");
-				return;
-			}
 			const nextPort = Array.isArray(this.config.port)
 				? (this.config.port[i] ?? this.config.port[this.config.port.length - 1])
 				: this.config.port;
-			const port = await this.getAvailablePort(nextPort!);
+			if (!Number.isInteger(nextPort) || nextPort! < 1 || nextPort! > 65535) {
+				if (this.processes.length) this.signal("SIGKILL");
+				throw new Error("mrrowisp: port must be an integer between 1 and 65535");
+			}
+			let port: number;
+			try {
+				port = await this.getAvailablePort(nextPort!);
+			} catch (err) {
+				if (this.processes.length) this.signal("SIGKILL");
+				throw err;
+			}
 			const { port: _port, ...config } = this.config;
 
 			const proc = spawn(
@@ -175,30 +121,37 @@ export class Mrrowisp {
 				["--config", JSON.stringify(config), "--port", port.toString()],
 				{ stdio: "pipe" },
 			);
+			await new Promise<void>((resolve, reject) => {
+				proc.once("spawn", resolve);
+				proc.once("error", reject);
+			}).catch((err: unknown) => {
+				if (this.processes?.length) this.signal("SIGKILL");
+				throw err;
+			});
 
 			this.processes.push({ process: proc, index: i });
 			this.processPorts.push(port);
 
-			const handleData = (data: Buffer) => {
-				const msg = data.toString().trim();
+			const handleLine = (msg: string) => {
 				const levelMatch = msg.match(/^\[(DEBUG|INFO|WARN|ERROR)\]/);
 				if (levelMatch) {
 					switch (levelMatch[1]) {
-						case "DEBUG": logger.debug(msg, i); break;
-						case "INFO": logger.info(msg, i); break;
-						case "WARN": logger.warn(msg, i); break;
-						case "ERROR": logger.error(msg, i); break;
+						case "DEBUG": this.logger.debug(msg, i); break;
+						case "INFO": this.logger.info(msg, i); break;
+						case "WARN": this.logger.warn(msg, i); break;
+						case "ERROR": this.logger.error(msg, i); break;
 					}
 				} else {
-					logger.error(msg, i);
+					this.logger.error(msg, i);
 				}
 			};
 
-			proc.stdout?.on("data", handleData);
-			proc.stderr?.on("data", handleData);
+			if (proc.stdout) createInterface({ input: proc.stdout }).on("line", handleLine);
+			if (proc.stderr) createInterface({ input: proc.stderr }).on("line", handleLine);
+			proc.on("error", (err) => this.logger.error(`worker ${i} error: ${err.message}`));
 
 			proc.on("close", (code) => {
-				logger.info(`child process ${i} exited with code ${code} D:`);
+				this.logger.info(`child process ${i} exited with code ${code}`);
 				if (this.processes) {
 					const idx = this.processes.findIndex((p) => p.index === i);
 					if (idx !== -1) {
@@ -210,7 +163,36 @@ export class Mrrowisp {
 					this.processes = undefined;
 				}
 			});
+
+			try {
+				await this.waitForWorker(port, proc);
+			} catch (err) {
+				this.signal("SIGKILL");
+				throw err;
+			}
 		}
+		return this;
+	}
+
+	private async waitForWorker(port: number, proc: ChildProcess): Promise<void> {
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			if (proc.exitCode !== null) {
+				throw new Error(`mrrowisp: worker exited before becoming ready: code ${proc.exitCode})`);
+			}
+			const healthy = await new Promise<boolean>((resolve) => {
+				const healthReq = request({ hostname: "127.0.0.1", port, path: "/health", timeout: 500 }, (res) => {
+					res.resume();
+					resolve(res.statusCode === 200);
+				});
+				healthReq.once("timeout", () => { healthReq.destroy(); resolve(false); });
+				healthReq.once("error", () => resolve(false));
+				healthReq.end();
+			});
+			if (healthy) return;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		throw new Error(`mrrowisp: worker on port ${port} did not become ready within 10 seconds`);
 	}
 
 	private nextPort(): number | null {
@@ -226,7 +208,7 @@ export class Mrrowisp {
 	route(req: IncomingMessage, socket: Socket, head: Buffer) {
 		const port = this.nextPort();
 		if (port === null) {
-			logger.error("mrrowisp is not running!! >w<");
+			this.logger.error("mrrowisp is not running");
 			socket.destroy();
 			return;
 		}
@@ -257,16 +239,61 @@ export class Mrrowisp {
 			proxySocket.on("error", () => socket.destroy());
 			socket.on("error", () => proxySocket.destroy());
 		});
+		proxyReq.setTimeout(10_000, () => {
+			proxyReq.destroy(new Error("worker upgrade timed out"));
+		});
+
+		proxyReq.on("response", (proxyRes) => {
+			const status = proxyRes.statusCode ?? 502;
+			const reason = proxyRes.statusMessage ?? "Bad Gateway";
+			const headers = Object.entries(proxyRes.headers)
+				.filter(([, value]) => value !== undefined)
+				.map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(", ") : value}`)
+				.join("\r\n");
+			socket.write(`HTTP/1.1 ${status} ${reason}\r\n${headers}\r\nConnection: close\r\n\r\n`);
+			proxyRes.pipe(socket);
+			proxyRes.on("end", () => socket.end());
+		});
 
 		proxyReq.on("error", (err) => {
-			logger.error(`proxy request error: ${err.message}`);
+			this.logger.error(`proxy request error: ${err.message}`);
 			socket.destroy();
 		});
 
 		proxyReq.end();
 	}
 
-	stop() { this.signal("SIGTERM"); }
+	async stop(timeoutMs = 10_000): Promise<void> {
+		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+			throw new RangeError("mrrowisp: stop timeout must be a positive number");
+		}
+		const workers = this.processes ? [...this.processes] : [];
+		if (workers.length === 0) {
+			this.logger.warn("mrrowisp is not running");
+			return;
+		}
+
+		const allExited = Promise.all(workers.map(({ process }) => {
+			if (process.exitCode !== null || process.signalCode !== null) return Promise.resolve();
+			return new Promise<void>((resolve) => process.once("close", () => resolve()));
+		}));
+		for (const { process } of workers) process.kill("SIGTERM");
+
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const graceful = await Promise.race([
+			allExited.then(() => true),
+			new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+		]);
+		if (timer) clearTimeout(timer);
+		if (!graceful) {
+			for (const { process } of workers) {
+				if (process.exitCode === null && process.signalCode === null) process.kill("SIGKILL");
+			}
+		}
+		this.processes = undefined;
+		this.processPorts = [];
+	}
+
 	kill() { this.signal("SIGKILL"); }
 
 	private signal(sig: "SIGTERM" | "SIGKILL") {
@@ -275,7 +302,7 @@ export class Mrrowisp {
 			this.processes = undefined;
 			this.processPorts = [];
 		} else {
-			logger.warn("mrrowisp is not running...");
+			this.logger.warn("mrrowisp is not running");
 		}
 	}
 }

@@ -10,14 +10,8 @@
 	"pendingQueueSize": 268435456,
 	"bufferRemainingLength": 32768,
 	"tcpNoDelay": true,
-	"blacklist": {
-		"hostnames": {},
-		"ports": {}
-	},
-	"whitelist": {
-		"hostnames": {},
-		"ports": {}
-	},
+	"blacklist": { "hostnames": {}, "ports": {} },
+	"whitelist": { "hostnames": {}, "ports": {} },
 	"websocketPermessageDeflate": false,
 	"dnsServers": [],
 	"dnsMethod": "resolve",
@@ -32,50 +26,39 @@
 	"parseRealIP": true,
 	"trustedProxies": ["127.0.0.1"],
 	"trustedHeaders": ["CF-Connecting-IP", "X-Forwarded-For"],
-	"nonWSResponse": "mrrow merp >w<",
-	"logLevel": "warn",
+	"nonWSResponse": "mrrowisp high-throughput relay",
+	"logLevel": "error",
 	"proxy": "",
 	"maxMessageSize": 1048581,
 	"staticDir": "",
 	"bandwidthLimitKbps": 0,
-	"connectionsLimitPerIP": 200,
-	"connectionWindowSeconds": 10,
+	"connectionsLimitPerIP": 0,
+	"connectionWindowSeconds": 0,
 	"floodProtection": {
-		"enabled": true,
-		"maxConnectsPerSourceIPPerSecond": 500,
-		"maxConnectsPerDestPerSecond": 100,
-		"maxConnectsPerDestPerMinute": 3000,
-		"maxInFlightSyns": 4096,
-		"maxConcurrentStreamsPerConnection": 2048,
-		"maxConcurrentConnections": 50000,
+		"enabled": false,
+		"maxConnectsPerSourceIPPerSecond": 0,
+		"maxConnectsPerDestPerSecond": 0,
+		"maxConnectsPerDestPerMinute": 0,
+		"maxInFlightSyns": 0,
+		"maxConcurrentStreamsPerConnection": 0,
+		"maxConcurrentConnections": 0,
 		"synFloodSignature": {
-			"enabled": true,
+			"enabled": false,
 			"windowMs": 2000,
-			"minSamples": 128,
+			"minSamples": 32,
 			"failedHandshakeRatio": 0.75
 		},
-		"wsCloseAfterViolations": 64,
+		"wsCloseAfterViolations": 0,
 		"logBlockedDials": false
 	},
 	"reputation": {
-		"enabled": true,
+		"enabled": false,
 		"storePath": "./data/mrrowisp-reputation.json",
 		"saveIntervalSeconds": 30,
 		"scoreDecayPerHour": 1,
 		"evictAfterDays": 7,
 		"thresholds": { "warn": 21, "throttle": 51, "strict": 81 },
-		"weights": {
-			"privateEgress": 15,
-			"synSignature": 25,
-			"twispNoAuth": 40,
-			"burstRate": 5,
-			"successfulStream": -2,
-			"requestKnownBadDest": 2
-		},
-		"destinationWeights": {
-			"privateEgress": 20,
-			"synSignature": 30,
-			"distinctSourcesEscalation": 1
-		}
+		"weights": {},
+		"destinationWeights": {}
 	}
 }

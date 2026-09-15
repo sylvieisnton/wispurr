@@ -17,6 +17,7 @@ func NewDNSCache(cfg DNSCacheConfig) *DNSCache {
 		ttl:         ttl,
 		resultOrder: cfg.ResultOrder,
 		cache:       make(map[string]dnsEntry),
+		stop:        make(chan struct{}),
 	}
 	cache.initResolver(cfg.Method)
 	cache.cleanup()
@@ -31,10 +32,21 @@ func (d *DNSCache) cleanup() {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			d.expire()
+		for {
+			select {
+			case <-ticker.C:
+				d.expire()
+			case <-d.stop:
+				return
+			}
 		}
 	}()
+}
+
+func (d *DNSCache) Close() {
+	if d != nil {
+		d.once.Do(func() { close(d.stop) })
+	}
 }
 
 func (d *DNSCache) expire() {
@@ -89,6 +101,7 @@ func normalizeDNSServer(server string) string {
 }
 
 func (d *DNSCache) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	host = NormalizeTargetHostname(host)
 	if ip := net.ParseIP(host); ip != nil {
 		return []net.IPAddr{{IP: ip}}, nil
 	}

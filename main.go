@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -40,22 +41,44 @@ func main() {
 	if setFlags["allow-loopback"] {
 		cfg.AllowLoopbackIPs = *fAllowLoopbackIPs
 	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Invalid configuration: %v\n", err)
+		os.Exit(2)
+	}
 
 	wispConfig := wisp.CreateWispConfig(&cfg)
 
-	wispHandler := wisp.CreateWispHandler(wispConfig)
+	wispHandler, err := wisp.NewWispHandler(wispConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Failed to initialize mrrowisp: %v\n", err)
+		os.Exit(2)
+	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"status\":\"ok\"}\n"))
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(wispConfig.Stats())
+	})
 	if cfg.StaticDir != "" {
-		http.Handle("/", http.FileServer(http.Dir(cfg.StaticDir)))
-		http.HandleFunc("/wisp", wispHandler)
+		mux.Handle("/", http.FileServer(http.Dir(cfg.StaticDir)))
+		mux.HandleFunc("/wisp", wispHandler)
 	} else {
-		http.HandleFunc("/", wispHandler)
+		mux.HandleFunc("/", wispHandler)
 	}
 	fmt.Printf("[INFO] Starting Mrrowisp on port %d. . .\n", cfg.Port)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	sigch := make(chan os.Signal, 1)
@@ -64,6 +87,7 @@ func main() {
 	go func() {
 		sig := <-sigch
 		fmt.Printf("[INFO] Shutting down (signal: %s)\n", sig.String())
+		wispConfig.Shutdown()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
@@ -72,6 +96,7 @@ func main() {
 	}()
 
 	err = server.ListenAndServe()
+	wispConfig.Shutdown()
 	if err != nil && err != http.ErrServerClosed {
 		fmt.Printf("[INFO] Failed to start Mrrowisp: %v", err)
 	}

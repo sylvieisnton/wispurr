@@ -123,6 +123,9 @@ func parseClientInfo(payload []byte) (*Extensions, error) {
 			exts.streamConfirm = true
 		}
 	}
+	if len(data) != 0 {
+		return nil, errorInvalid
+	}
 
 	return exts, nil
 }
@@ -143,10 +146,15 @@ func (c *wispConnection) handleInfo(streamId uint32, payload []byte) {
 	if c.handshakeDone == nil {
 		return
 	}
+	if len(payload) < 2 || payload[0] != wispMajorVersion {
+		c.sendClosePacketAndWait(0, closeReasonIncompatible)
+		c.close()
+		return
+	}
 
 	clientExts, err := parseClientInfo(payload)
 	if err != nil {
-		c.sendClosePacket(0, closeReasonIncompatible)
+		c.sendClosePacketAndWait(0, closeReasonIncompatible)
 		c.close()
 		return
 	}
@@ -159,14 +167,14 @@ func (c *wispConnection) handleInfo(streamId uint32, payload []byte) {
 		if userExists && checkPassword(c.config.Logger, expectedPassword, clientExts.passwordPassword) {
 			authPassed = true
 		} else {
-			c.sendClosePacket(0, closeReasonAuthBadPassword)
+			c.sendClosePacketAndWait(0, closeReasonAuthBadPassword)
 			c.close()
 			return
 		}
 	}
 
 	if authRequired && !authPassed {
-		c.sendClosePacket(0, closeReasonAuthRequired)
+		c.sendClosePacketAndWait(0, closeReasonAuthRequired)
 		c.close()
 		return
 	}

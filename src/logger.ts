@@ -10,8 +10,8 @@ const levelPriority: Record<LogLevel, number> = {
 	none: 4,
 };
 
-class Logger {
-	level: LogLevel = "info";
+export class Logger {
+	constructor(public level: LogLevel = "info") {}
 
 	private shouldLog(method: Exclude<LogLevel, "none">): boolean {
 		return levelPriority[method] >= levelPriority[this.level];
@@ -39,7 +39,3 @@ class Logger {
 		this.write(message, "#89b4fa", index);
 	}
 }
-
-const logger = new Logger();
-
-export default logger;

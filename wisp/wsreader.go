@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -28,13 +29,13 @@ func getWSPayloadBuf(size int) *[]byte {
 }
 
 func putWSPayloadBuf(bufp *[]byte) {
-	if bufp == nil || cap(*bufp) == 0 {
+	if bufp == nil || cap(*bufp) == 0 || cap(*bufp) > wsPayloadPoolSize {
 		return
 	}
 	wsPayloadPool.Put(bufp)
 }
 
-const readFrameBufSize = 64 * 1024
+const readFrameBufSize = 14
 
 type frameReader struct {
 	conn net.Conn
@@ -105,6 +106,8 @@ func (f *frameReader) readPayload(dst []byte) error {
 func (c *wispConnection) readLoop() {
 	defer c.deleteAllWispStreams()
 	reader := newFrameReader(c.netConn)
+	var fragmentedOpcode uint8
+	var fragmented []byte
 
 	for {
 		hdr, err := reader.peek(2)
@@ -120,7 +123,7 @@ func (c *wispConnection) readLoop() {
 		masked := b1&0x80 != 0
 		lengthCode := b1 & 0x7F
 
-		if rsv != 0 || !masked || !fin {
+		if rsv != 0 || !masked {
 			c.sendWSClose(1002)
 			return
 		}
@@ -148,10 +151,14 @@ func (c *wispConnection) readLoop() {
 			payloadLen = uint64(binary.BigEndian.Uint16(hdr[2:4]))
 		case lengthCode == 127:
 			payloadLen = binary.BigEndian.Uint64(hdr[2:10])
+			if hdr[2]&0x80 != 0 {
+				c.sendWSClose(1002)
+				return
+			}
 		}
 
 		isControlFrame := opcode >= 0x8
-		if isControlFrame && payloadLen > 125 {
+		if isControlFrame && (!fin || payloadLen > 125) {
 			c.sendWSClose(1002)
 			return
 		}
@@ -181,13 +188,56 @@ func (c *wispConnection) readLoop() {
 
 		keep := false
 		switch opcode {
-		case 0x2, 0x1:
+		case 0x0:
+			if fragmentedOpcode == 0 {
+				putWSPayloadBuf(bufp)
+				c.sendWSClose(1002)
+				return
+			}
+			if uint64(len(fragmented))+payloadLen > c.maxPayloadSize() {
+				putWSPayloadBuf(bufp)
+				c.sendWSClose(1009)
+				return
+			}
+			fragmented = append(fragmented, payload...)
+			putWSPayloadBuf(bufp)
+			if fin {
+				c.handleWispFrame(fragmented, nil)
+				fragmented = nil
+				fragmentedOpcode = 0
+			}
+			continue
+
+		case 0x2:
+			if fragmentedOpcode != 0 {
+				putWSPayloadBuf(bufp)
+				c.sendWSClose(1002)
+				return
+			}
+			if !fin {
+				fragmentedOpcode = opcode
+				fragmented = append(fragmented[:0], payload...)
+				putWSPayloadBuf(bufp)
+				continue
+			}
 			keep = c.handleWispFrame(payload, bufp)
+
+		case 0x1:
+			putWSPayloadBuf(bufp)
+			c.sendWSClose(1003)
+			return
 
 		case 0x9:
 			_ = c.writeRawPong(payload)
 
+		case 0xA:
+
 		case 0x8:
+			if len(payload) == 1 {
+				putWSPayloadBuf(bufp)
+				c.sendWSClose(1002)
+				return
+			}
 			if len(payload) >= 2 {
 				code := binary.BigEndian.Uint16(payload[:2])
 				c.sendWSClose(code)
@@ -197,6 +247,9 @@ func (c *wispConnection) readLoop() {
 			putWSPayloadBuf(bufp)
 			return
 		default:
+			putWSPayloadBuf(bufp)
+			c.sendWSClose(1002)
+			return
 		}
 
 		if !keep {
@@ -278,5 +331,6 @@ func (c *wispConnection) sendWSClose(code uint16) {
 	buf[0] = 0x88
 	buf[1] = 2
 	binary.BigEndian.PutUint16(buf[2:4], code)
-	c.queueWrite(buf)
+	_ = c.netConn.SetWriteDeadline(time.Now().Add(time.Second))
+	_ = c.writeAndWait(buf)
 }

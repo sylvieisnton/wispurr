@@ -5,11 +5,20 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 var connIDCounter uint64
 
-const streamCacheSize = 32
+const streamCacheSize = 256
+
+func (c *wispConnection) maxPendingQueueBytes() int {
+	if c != nil && c.config != nil && c.config.PendingQueueSize > 0 {
+		return c.config.PendingQueueSize
+	}
+	return defaultPendingQueueBytes
+}
 
 func (c *wispConnection) close() {
 	if !c.isClosed.CompareAndSwap(false, true) {
@@ -19,17 +28,17 @@ func (c *wispConnection) close() {
 	close(c.closeCh)
 
 	c.pendingMutex.Lock()
-	if !c.writeActive {
-		pending := c.pendingWrites
-		c.pendingWrites = nil
-		c.pendingMutex.Unlock()
-		for _, r := range pending {
-			if r.buf != nil {
-				c.config.ReadBufPool.Put(r.buf)
-			}
+	pending := c.pendingWrites
+	c.pendingWrites = nil
+	c.pendingBytes = 0
+	c.pendingMutex.Unlock()
+	for _, r := range pending {
+		if r.buf != nil {
+			c.config.ReadBufPool.Put(r.buf)
 		}
-	} else {
-		c.pendingMutex.Unlock()
+		if r.done != nil {
+			r.done <- net.ErrClosed
+		}
 	}
 }
 
@@ -69,12 +78,17 @@ func (c *wispConnection) runWriter() {
 
 		var err error
 		if len(bufs) == 1 {
-			_, err = c.netConn.Write(bufs[0])
+			err = writeAll(c.netConn, bufs[0])
 		} else {
 			_, err = bufs.WriteTo(c.netConn)
 		}
 		for _, p := range pooled {
 			c.config.ReadBufPool.Put(p)
+		}
+		for _, r := range batch {
+			if r.done != nil {
+				r.done <- err
+			}
 		}
 		if err != nil {
 			c.pendingMutex.Lock()
@@ -91,13 +105,19 @@ func (c *wispConnection) submitWrite(req writeReq) {
 		if req.buf != nil {
 			c.config.ReadBufPool.Put(req.buf)
 		}
+		if req.done != nil {
+			req.done <- net.ErrClosed
+		}
 		return
 	}
 	c.pendingMutex.Lock()
-	if c.pendingBytes+len(req.data) > maxPendingQueueBytes {
+	if c.pendingBytes+len(req.data) > c.maxPendingQueueBytes() {
 		c.pendingMutex.Unlock()
 		if req.buf != nil {
 			c.config.ReadBufPool.Put(req.buf)
+		}
+		if req.done != nil {
+			req.done <- net.ErrClosed
 		}
 		c.close()
 		return
@@ -110,7 +130,7 @@ func (c *wispConnection) submitWrite(req writeReq) {
 	}
 	c.writeActive = true
 	c.pendingMutex.Unlock()
-	c.runWriter()
+	go c.runWriter()
 }
 
 func (c *wispConnection) queueWrite(data []byte) {
@@ -119,6 +139,12 @@ func (c *wispConnection) queueWrite(data []byte) {
 
 func (c *wispConnection) queueWritePooled(data []byte, buf *[]byte) {
 	c.submitWrite(writeReq{data: data, buf: buf})
+}
+
+func (c *wispConnection) writeAndWait(data []byte) error {
+	done := make(chan error, 1)
+	c.submitWrite(writeReq{data: data, done: done})
+	return <-done
 }
 
 func (c *wispConnection) handlePacket(packetType uint8, streamId uint32, payload []byte) {
@@ -145,12 +171,17 @@ func (c *wispConnection) handlePacket(packetType uint8, streamId uint32, payload
 
 func (c *wispConnection) handleConnectPacket(streamId uint32, payload []byte) {
 	if len(payload) < 3 {
+		c.sendClosePacket(streamId, closeReasonInvalidInfo)
 		return
 	}
 	streamType := payload[0]
 	portU16 := binary.LittleEndian.Uint16(payload[1:3])
 	port := strconv.FormatUint(uint64(portU16), 10)
 	hostname := string(payload[3:])
+	if streamId == 0 || (portU16 == 0 && streamType != streamTypeTerm) || hostname == "" || !utf8.ValidString(hostname) {
+		c.sendClosePacket(streamId, closeReasonInvalidInfo)
+		return
+	}
 
 	c.config.Logger.Debug("creating stream", "ip", c.remoteIP, "streamId", streamId, "hostname", hostname, "port", port, "type", streamType)
 
@@ -187,6 +218,7 @@ func (c *wispConnection) handleConnectPacket(streamId uint32, payload []byte) {
 
 	if _, loaded := c.streams.LoadOrStore(streamId, stream); loaded {
 		close(stream.connReady)
+		c.sendClosePacket(streamId, closeReasonInvalidInfo)
 		return
 	}
 
@@ -244,11 +276,10 @@ func (c *wispConnection) repAddDest(ip string, port int, reason string) {
 }
 
 func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp *[]byte) bool {
+	c.ingressBytes.Add(uint64(len(payload)))
 	slot := &c.streamCache[streamId&(streamCacheSize-1)]
-	var stream *wispStream
-	if slot.id == streamId && slot.stream != nil {
-		stream = slot.stream
-	} else {
+	stream := slot.Load()
+	if stream == nil || stream.streamId != streamId {
 		v, ok := c.streams.Load(streamId)
 		if !ok {
 			if c.twispStreams != nil {
@@ -264,11 +295,13 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 			return false
 		}
 		stream = v.(*wispStream)
-		slot.id = streamId
-		slot.stream = stream
+		slot.Store(stream)
 	}
 
 	if !stream.isOpen.Load() {
+		return false
+	}
+	if c.globals != nil && c.globals.Bandwidth != nil && !c.globals.Bandwidth.Wait(c.closeCh, c.remoteIP, len(payload)) {
 		return false
 	}
 
@@ -292,7 +325,7 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 
 	if stream.streamType == streamTypeTCP && stream.ingressActive.Load() {
 		if !stream.queueIngressOwned(payload, bufp) {
-			return false
+			return true
 		}
 		stream.bufferRemaining--
 		if stream.bufferRemaining == 0 {
@@ -302,7 +335,7 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 		return true
 	}
 
-	_, err := stream.conn.Write(payload)
+	err := writeAll(stream.conn, payload)
 	if err != nil {
 		stream.close(closeReasonNetworkError)
 		return false
@@ -324,6 +357,10 @@ func (c *wispConnection) twispAuthorized() bool {
 
 func (c *wispConnection) handleClosePacket(streamId uint32, payload []byte) {
 	if len(payload) < 1 {
+		return
+	}
+	if streamId == 0 {
+		c.close()
 		return
 	}
 
@@ -361,6 +398,18 @@ func (c *wispConnection) sendClosePacket(streamId uint32, reason uint8) {
 	if c.isClosed.Load() {
 		return
 	}
+	c.queueWrite(buildClosePacket(streamId, reason))
+}
+
+func (c *wispConnection) sendClosePacketAndWait(streamId uint32, reason uint8) {
+	if c.isClosed.Load() {
+		return
+	}
+	_ = c.netConn.SetWriteDeadline(time.Now().Add(time.Second))
+	_ = c.writeAndWait(buildClosePacket(streamId, reason))
+}
+
+func buildClosePacket(streamId uint32, reason uint8) []byte {
 	buf := make([]byte, 8)
 	buf[0] = 0x82
 	buf[1] = 6
@@ -370,7 +419,7 @@ func (c *wispConnection) sendClosePacket(streamId uint32, reason uint8) {
 	buf[5] = byte(streamId >> 16)
 	buf[6] = byte(streamId >> 24)
 	buf[7] = reason
-	c.queueWrite(buf)
+	return buf
 }
 
 func (c *wispConnection) writeRawPong(payload []byte) error {
@@ -389,8 +438,8 @@ func (c *wispConnection) writeRawPong(payload []byte) error {
 func (c *wispConnection) deleteWispStream(streamId uint32) {
 	c.streams.Delete(streamId)
 	slot := &c.streamCache[streamId&(streamCacheSize-1)]
-	if slot.id == streamId {
-		slot.stream = nil
+	if cached := slot.Load(); cached != nil && cached.streamId == streamId {
+		slot.CompareAndSwap(cached, nil)
 	}
 	c.streamCount.Add(-1)
 }
@@ -415,6 +464,9 @@ func (c *wispConnection) deleteAllWispStreams() {
 		}
 	}
 	if c.globals != nil {
+		c.globals.active.Delete(c.connID)
+		c.globals.totalIngressBytes.Add(c.ingressBytes.Load())
+		c.globals.totalEgressBytes.Add(c.egressBytes.Load())
 		if c.globals.Connections != nil {
 			c.globals.Connections.Release()
 		}

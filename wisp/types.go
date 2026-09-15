@@ -42,6 +42,8 @@ type DNSCache struct {
 	mu    sync.RWMutex
 	cache map[string]dnsEntry
 	group singleflight.Group
+	stop  chan struct{}
+	once  sync.Once
 }
 
 // egress
@@ -146,11 +148,7 @@ type Extensions struct {
 type writeReq struct {
 	data []byte
 	buf  *[]byte
-}
-
-type streamCacheEntry struct {
-	id     uint32
-	stream *wispStream
+	done chan error
 }
 
 type wispConnection struct {
@@ -162,11 +160,11 @@ type wispConnection struct {
 	twispStreams *twispRegistry
 	remoteIP     string
 
-	streamCache [streamCacheSize]streamCacheEntry
+	streamCache [streamCacheSize]atomic.Pointer[wispStream]
 
 	pendingMutex  sync.Mutex
 	pendingWrites []writeReq
-	pendingBytes   int
+	pendingBytes  int
 	writeActive   bool
 
 	isV2          bool
@@ -180,9 +178,11 @@ type wispConnection struct {
 	createdAt   time.Time
 	streamCount atomic.Int32
 
-	globals    *Globals
-	connID     uint64
-	violations atomic.Int32
+	globals      *Globals
+	connID       uint64
+	violations   atomic.Int32
+	ingressBytes atomic.Uint64
+	egressBytes  atomic.Uint64
 }
 
 // wisp stream

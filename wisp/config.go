@@ -3,6 +3,9 @@ package wisp
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -31,12 +34,25 @@ func (f *FilterSet) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		if name != "hostnames" && name != "ports" {
+			return fmt.Errorf("unknown filter field %q", name)
+		}
+	}
 
 	if len(raw.Hostnames) > 0 {
 		var arr []string
 		if err := json.Unmarshal(raw.Hostnames, &arr); err == nil {
 			for _, h := range arr {
-				f.Hostnames[strings.ToLower(h)] = struct{}{}
+				host := NormalizeTargetHostname(h)
+				if host == "" {
+					return fmt.Errorf("hostname filter cannot be empty")
+				}
+				f.Hostnames[host] = struct{}{}
 			}
 		} else {
 			var obj map[string]json.RawMessage
@@ -44,7 +60,11 @@ func (f *FilterSet) UnmarshalJSON(data []byte) error {
 				return fmt.Errorf("hostnames: expected array of strings, got %s", string(raw.Hostnames))
 			}
 			for h := range obj {
-				f.Hostnames[strings.ToLower(h)] = struct{}{}
+				host := NormalizeTargetHostname(h)
+				if host == "" {
+					return fmt.Errorf("hostname filter cannot be empty")
+				}
+				f.Hostnames[host] = struct{}{}
 			}
 		}
 	}
@@ -55,7 +75,11 @@ func (f *FilterSet) UnmarshalJSON(data []byte) error {
 			for _, p := range arr {
 				switch v := p.(type) {
 				case float64:
-					f.Ports[uint16(v)] = struct{}{}
+					port, err := validPortNumber(v)
+					if err != nil {
+						return err
+					}
+					f.Ports[port] = struct{}{}
 				case []interface{}:
 					if len(v) != 2 {
 						return fmt.Errorf("ports range must have exactly 2 elements")
@@ -64,6 +88,12 @@ func (f *FilterSet) UnmarshalJSON(data []byte) error {
 					end, ok2 := v[1].(float64)
 					if !ok1 || !ok2 {
 						return fmt.Errorf("ports range elements must be numbers")
+					}
+					if _, err := validPortNumber(start); err != nil {
+						return err
+					}
+					if _, err := validPortNumber(end); err != nil {
+						return err
 					}
 					if end < start {
 						start, end = end, start
@@ -82,7 +112,7 @@ func (f *FilterSet) UnmarshalJSON(data []byte) error {
 			}
 			for k := range obj {
 				n, perr := strconv.ParseUint(k, 10, 16)
-				if perr != nil {
+				if perr != nil || n == 0 {
 					return fmt.Errorf("ports: object key %q is not a valid port number", k)
 				}
 				f.Ports[uint16(n)] = struct{}{}
@@ -103,8 +133,10 @@ type Config struct {
 	AllowPrivateIPs  bool `json:"allowPrivateIPs"`
 	AllowLoopbackIPs bool `json:"allowLoopbackIPs"`
 
-	TcpBufferSize int  `json:"tcpBufferSize"`
-	TcpNoDelay    bool `json:"tcpNoDelay"`
+	TcpBufferSize    int  `json:"tcpBufferSize"`
+	TcpNoDelay       bool `json:"tcpNoDelay"`
+	SocketBufferSize int  `json:"socketBufferSize"`
+	PendingQueueSize int  `json:"pendingQueueSize"`
 
 	Blacklist FilterSet `json:"blacklist"`
 	Whitelist FilterSet `json:"whitelist"`
@@ -117,11 +149,12 @@ type Config struct {
 
 	EnableTwisp bool `json:"enableTwisp"`
 
-	EnableV2             bool              `json:"enableV2"`
-	Motd                 string            `json:"motd"`
-	PasswordAuth         bool              `json:"passwordAuth"`
-	PasswordAuthRequired bool              `json:"passwordAuthRequired"`
-	PasswordUsers        map[string]string `json:"passwordUsers"`
+	EnableV2                bool              `json:"enableV2"`
+	HandshakeTimeoutSeconds int               `json:"handshakeTimeoutSeconds"`
+	Motd                    string            `json:"motd"`
+	PasswordAuth            bool              `json:"passwordAuth"`
+	PasswordAuthRequired    bool              `json:"passwordAuthRequired"`
+	PasswordUsers           map[string]string `json:"passwordUsers"`
 
 	ParseRealIP    bool     `json:"parseRealIP"`
 	TrustedProxies []string `json:"trustedProxies"`
@@ -144,11 +177,11 @@ type Config struct {
 	FloodProtection *FloodProtectionConfig `json:"floodProtection"`
 	Reputation      *ReputationConfig      `json:"reputation"`
 
-	Logger      Logger
-	DNSCache    *DNSCache
-	ReadBufPool *sync.Pool
-	Dialer      net.Dialer
-	Globals     *Globals
+	Logger      Logger     `json:"-"`
+	DNSCache    *DNSCache  `json:"-"`
+	ReadBufPool *sync.Pool `json:"-"`
+	Dialer      net.Dialer `json:"-"`
+	Globals     *Globals   `json:"-"`
 }
 
 type FloodProtectionConfig struct {
@@ -185,15 +218,11 @@ type ReputationConfig struct {
 	SaveIntervalSeconds int `json:"saveIntervalSeconds"`
 }
 
-type Globals struct {
-	PerSource    *SlidingWindow
-	PerDestSec   *SlidingWindow
-	PerDestMin   *SlidingWindow
-	InFlightSyns *Semaphore
-	Connections  *Semaphore
-	Egress       *EgressPolicy
-	Reputation   *Reputation
-	Signature    *Signatures
+func validPortNumber(value float64) (uint16, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) || value < 1 || value > 65535 {
+		return 0, fmt.Errorf("port must be an integer between 1 and 65535")
+	}
+	return uint16(value), nil
 }
 
 type SignatureConfig struct {
@@ -224,8 +253,10 @@ func DefaultConfig() Config {
 		AllowPrivateIPs:  false,
 		AllowLoopbackIPs: false,
 
-		TcpBufferSize: 32768,
-		TcpNoDelay:    true,
+		TcpBufferSize:    256 * 1024,
+		TcpNoDelay:       true,
+		SocketBufferSize: 16 * 1024 * 1024,
+		PendingQueueSize: 64 * 1024 * 1024,
 
 		DnsServers:     []string{},
 		DnsMethod:      "resolve",
@@ -233,11 +264,12 @@ func DefaultConfig() Config {
 
 		EnableTwisp: false,
 
-		EnableV2:             true,
-		Motd:                 "",
-		PasswordAuth:         false,
-		PasswordAuthRequired: false,
-		PasswordUsers:        map[string]string{},
+		EnableV2:                true,
+		HandshakeTimeoutSeconds: 10,
+		Motd:                    "",
+		PasswordAuth:            false,
+		PasswordAuthRequired:    false,
+		PasswordUsers:           map[string]string{},
 
 		ParseRealIP:    true,
 		TrustedProxies: []string{},
@@ -256,58 +288,171 @@ func DefaultConfig() Config {
 	}
 }
 
-func CreateWispConfig(cfg *Config) *Config {
-	wispCfg := &Config{
-		Port: cfg.Port,
-
-		AllowTCP: cfg.AllowTCP,
-		AllowUDP: cfg.AllowUDP,
-
-		AllowDirectIP:    cfg.AllowDirectIP,
-		AllowPrivateIPs:  cfg.AllowPrivateIPs,
-		AllowLoopbackIPs: cfg.AllowLoopbackIPs,
-
-		TcpBufferSize: cfg.TcpBufferSize,
-		TcpNoDelay:    cfg.TcpNoDelay,
-
-		Blacklist: cfg.Blacklist,
-		Whitelist: cfg.Whitelist,
-
-		WebsocketPermessageDeflate: cfg.WebsocketPermessageDeflate,
-
-		DnsServers:     cfg.DnsServers,
-		DnsMethod:      cfg.DnsMethod,
-		DnsResultOrder: cfg.DnsResultOrder,
-
-		EnableTwisp: cfg.EnableTwisp,
-
-		EnableV2:             cfg.EnableV2,
-		Motd:                 cfg.Motd,
-		PasswordAuth:         cfg.PasswordAuth,
-		PasswordAuthRequired: cfg.PasswordAuthRequired,
-		PasswordUsers:        cfg.PasswordUsers,
-
-		ParseRealIP:    cfg.ParseRealIP,
-		TrustedProxies: cfg.TrustedProxies,
-		TrustedHeaders: cfg.TrustedHeaders,
-		NonWSResponse:  cfg.NonWSResponse,
-
-		FloodProtection: cfg.FloodProtection,
-		Reputation:      cfg.Reputation,
-
-		LogLevel: cfg.LogLevel,
-
-		Proxy:                   cfg.Proxy,
-		MaxMessageSize:          cfg.MaxMessageSize,
-		StaticDir:               cfg.StaticDir,
-		BandwidthLimitKbps:      cfg.BandwidthLimitKbps,
-		ConnectionsLimitPerIP:   cfg.ConnectionsLimitPerIP,
-		ConnectionWindowSeconds: cfg.ConnectionWindowSeconds,
-
-		BufferRemainingLength: cfg.BufferRemainingLength,
+func (cfg *Config) Validate() error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
 	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	if cfg.TcpBufferSize < 1024 || cfg.TcpBufferSize > 16*1024*1024 {
+		return fmt.Errorf("tcpBufferSize must be between 1024 and 16777216")
+	}
+	if cfg.SocketBufferSize < 64*1024 || cfg.SocketBufferSize > 256*1024*1024 {
+		return fmt.Errorf("socketBufferSize must be between 65536 and 268435456")
+	}
+	if cfg.PendingQueueSize < cfg.TcpBufferSize || cfg.PendingQueueSize > 1024*1024*1024 {
+		return fmt.Errorf("pendingQueueSize must be at least tcpBufferSize and at most 1073741824")
+	}
+	if cfg.WebsocketPermessageDeflate {
+		return fmt.Errorf("websocketPermessageDeflate is incompatible with the zero-copy frame path")
+	}
+	if err := validateProxyURL(cfg.Proxy); err != nil {
+		return err
+	}
+	if cfg.BufferRemainingLength == 0 {
+		return fmt.Errorf("bufferRemainingLength must be greater than zero")
+	}
+	if cfg.MaxMessageSize < 0 {
+		return fmt.Errorf("maxMessageSize cannot be negative")
+	}
+	if cfg.MaxMessageSize > 0 && cfg.MaxMessageSize < 5 {
+		return fmt.Errorf("maxMessageSize must be zero or at least 5")
+	}
+	if cfg.MaxMessageSize > 1024*1024*1024 {
+		return fmt.Errorf("maxMessageSize cannot exceed 1073741824")
+	}
+	if cfg.ConnectionsLimitPerIP < 0 || cfg.ConnectionWindowSeconds < 0 || cfg.BandwidthLimitKbps < 0 {
+		return fmt.Errorf("connection and bandwidth limits cannot be negative")
+	}
+	if cfg.BandwidthLimitKbps > 1_000_000_000 {
+		return fmt.Errorf("bandwidthLimitKbps cannot exceed 1000000000")
+	}
+	if (cfg.ConnectionsLimitPerIP == 0) != (cfg.ConnectionWindowSeconds == 0) {
+		return fmt.Errorf("connectionsLimitPerIP and connectionWindowSeconds must both be set or both be zero")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.DnsMethod)) {
+	case "lookup", "resolve":
+	default:
+		return fmt.Errorf("dnsMethod must be lookup or resolve")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.DnsResultOrder)) {
+	case "ipv4first", "ipv6first", "verbatim":
+	default:
+		return fmt.Errorf("dnsResultOrder must be ipv4first, ipv6first, or verbatim")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.LogLevel)) {
+	case "debug", "info", "warn", "error", "none":
+	default:
+		return fmt.Errorf("logLevel must be debug, info, warn, error, or none")
+	}
+	for _, entry := range cfg.TrustedProxies {
+		entry = strings.TrimSpace(entry)
+		if net.ParseIP(entry) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err != nil {
+			return fmt.Errorf("trustedProxies entry %q is not an IP address or CIDR", entry)
+		}
+	}
+	for _, header := range cfg.TrustedHeaders {
+		if !validHTTPHeaderName(header) {
+			return fmt.Errorf("trustedHeaders entry %q is not a valid HTTP header name", header)
+		}
+	}
+	if cfg.PasswordAuthRequired && !cfg.PasswordAuth {
+		return fmt.Errorf("passwordAuthRequired requires passwordAuth")
+	}
+	if cfg.PasswordAuthRequired && len(cfg.PasswordUsers) == 0 {
+		return fmt.Errorf("passwordAuthRequired requires at least one passwordUsers entry")
+	}
+	if cfg.HandshakeTimeoutSeconds < 1 || cfg.HandshakeTimeoutSeconds > 300 {
+		return fmt.Errorf("handshakeTimeoutSeconds must be between 1 and 300")
+	}
+	if cfg.FloodProtection != nil {
+		fp := cfg.FloodProtection
+		limits := []struct {
+			name  string
+			value int
+		}{
+			{"maxConnectsPerSourceIPPerSecond", fp.MaxConnectsPerSourceIPPerSecond},
+			{"maxConnectsPerDestPerSecond", fp.MaxConnectsPerDestPerSecond},
+			{"maxConnectsPerDestPerMinute", fp.MaxConnectsPerDestPerMinute},
+			{"maxInFlightSyns", fp.MaxInFlightSyns},
+			{"maxConcurrentStreamsPerConnection", fp.MaxConcurrentStreamsPerConnection},
+			{"maxConcurrentConnections", fp.MaxConcurrentConnections},
+			{"wsCloseAfterViolations", fp.WsCloseAfterViolations},
+		}
+		for _, limit := range limits {
+			if limit.value < 0 {
+				return fmt.Errorf("floodProtection.%s cannot be negative", limit.name)
+			}
+		}
+		s := cfg.FloodProtection.SynFloodSignature
+		if s.FailedHandshakeRatio < 0 || s.FailedHandshakeRatio > 1 {
+			return fmt.Errorf("synFloodSignature.failedHandshakeRatio must be between 0 and 1")
+		}
+		if s.Enabled && (s.WindowMs <= 0 || s.MinSamples <= 0 || s.FailedHandshakeRatio <= 0) {
+			return fmt.Errorf("enabled synFloodSignature requires positive windowMs, minSamples, and failedHandshakeRatio")
+		}
+	}
+	return nil
+}
 
-	return wispCfg
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func CreateWispConfig(cfg *Config) *Config {
+	if cfg == nil {
+		defaults := DefaultConfig()
+		cfg = &defaults
+	}
+	clone := *cfg
+	clone.Blacklist = FilterSet{
+		Hostnames: maps.Clone(cfg.Blacklist.Hostnames),
+		Ports:     maps.Clone(cfg.Blacklist.Ports),
+	}
+	clone.Whitelist = FilterSet{
+		Hostnames: maps.Clone(cfg.Whitelist.Hostnames),
+		Ports:     maps.Clone(cfg.Whitelist.Ports),
+	}
+	clone.DnsServers = append([]string(nil), cfg.DnsServers...)
+	clone.PasswordUsers = maps.Clone(cfg.PasswordUsers)
+	clone.TrustedProxies = append([]string(nil), cfg.TrustedProxies...)
+	clone.TrustedHeaders = append([]string(nil), cfg.TrustedHeaders...)
+	if cfg.FloodProtection != nil {
+		flood := *cfg.FloodProtection
+		clone.FloodProtection = &flood
+	}
+	if cfg.Reputation != nil {
+		reputation := *cfg.Reputation
+		reputation.Weights = maps.Clone(cfg.Reputation.Weights)
+		reputation.DestWeights = maps.Clone(cfg.Reputation.DestWeights)
+		clone.Reputation = &reputation
+	}
+	clone.trustedProxyNets = nil
+	clone.Logger = nil
+	clone.DNSCache = nil
+	clone.ReadBufPool = nil
+	clone.Dialer = net.Dialer{}
+	clone.Globals = nil
+	return &clone
 }
 
 func LoadConfig(config string) (Config, error) {
@@ -315,7 +460,7 @@ func LoadConfig(config string) (Config, error) {
 
 	trimConfig := strings.TrimSpace(config)
 	if strings.HasPrefix(trimConfig, "{") {
-		if err := json.Unmarshal([]byte(trimConfig), &cfg); err != nil {
+		if err := decodeConfig(strings.NewReader(trimConfig), &cfg); err != nil {
 			return cfg, err
 		}
 		return cfg, nil
@@ -327,9 +472,23 @@ func LoadConfig(config string) (Config, error) {
 	}
 	defer file.Close()
 
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decodeConfig(file, &cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func decodeConfig(reader io.Reader, cfg *Config) error {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(cfg); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("config contains multiple JSON values")
+		}
+		return fmt.Errorf("invalid trailing config data: %w", err)
+	}
+	return nil
 }
