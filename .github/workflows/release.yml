@@ -23,10 +23,11 @@ jobs:
           check-latest: true
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -47,6 +48,4 @@ jobs:
           files: "dist/bin/*"
 
       - name: Publish
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
