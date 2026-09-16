@@ -4,7 +4,7 @@
 		"type": "git",
 		"url": "git+https://github.com/sylvieisnton/wispurr.git"
 	},
-	"version": "3.9.9",
+	"version": "4.0.0",
 	"module": "index.ts",
 	"type": "module",
 	"author": "sylvieisnton",
