@@ -18,7 +18,7 @@ export class Logger {
 	}
 
 	private write(message: string, color: string, index?: number) {
-		const tag = index !== undefined ? `mrrowisp-${index}` : "mrrowisp";
+		const tag = index !== undefined ? `wispurr-${index}` : "wispurr";
 		console.log(chalk.bold(chalk.hex(color)(`[${tag}]: ${message}`)));
 	}
 

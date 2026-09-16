@@ -3,5 +3,5 @@ wisp/
 build.sh
 go.*
 *.go
-./mrrowisp
+./wispurr
 *.png

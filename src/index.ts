@@ -6,32 +6,32 @@ import { Logger } from "./logger.js";
 import { request, type IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 import { createInterface } from "node:readline";
-import type { MrrowispConfig, MrrowispOptions } from "./config.js";
+import type { wispurrConfig, wispurrOptions } from "./config.js";
 
-export type { MrrowispConfig, MrrowispOptions } from "./config.js";
+export type { wispurrConfig, wispurrOptions } from "./config.js";
 
 type Process = Array<{
 	process: ChildProcess;
 	index: number;
 }>;
 
-let cachedDefaultConfig: MrrowispConfig | undefined;
+let cachedDefaultConfig: wispurrConfig | undefined;
 
-function loadDefaultConfig(): MrrowispConfig {
+function loadDefaultConfig(): wispurrConfig {
 	if (cachedDefaultConfig) return cachedDefaultConfig;
 	try {
 		cachedDefaultConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-		return cachedDefaultConfig as MrrowispConfig;
+		return cachedDefaultConfig as wispurrConfig;
 	} catch (err) {
 		throw new Error(
-			`mrrowisp: failed to read bundled config at ${configPath}`,
+			`wispurr: failed to read bundled config at ${configPath}`,
 			{ cause: err },
 		);
 	}
 }
 
-export class Mrrowisp {
-	config: MrrowispConfig;
+export class wispurr {
+	config: wispurrConfig;
 	processes: Process | undefined;
 	private reqIndex = 0;
 	private processPorts: number[] = [];
@@ -45,7 +45,7 @@ export class Mrrowisp {
 		return [...this.processPorts];
 	}
 
-	constructor(config?: MrrowispOptions) {
+	constructor(config?: wispurrOptions) {
 		this.config = structuredClone(loadDefaultConfig());
 		this.processes = undefined;
 		if (config) {
@@ -60,7 +60,7 @@ export class Mrrowisp {
 					synFloodSignature: {
 						...this.config.floodProtection.synFloodSignature,
 						...config.floodProtection?.synFloodSignature,
-					} as NonNullable<MrrowispConfig["floodProtection"]["synFloodSignature"]>,
+					} as NonNullable<wispurrConfig["floodProtection"]["synFloodSignature"]>,
 				},
 				reputation: {
 					...this.config.reputation,
@@ -68,7 +68,7 @@ export class Mrrowisp {
 					thresholds: {
 						...this.config.reputation.thresholds,
 						...config.reputation?.thresholds,
-					} as NonNullable<MrrowispConfig["reputation"]["thresholds"]>,
+					} as NonNullable<wispurrConfig["reputation"]["thresholds"]>,
 					weights: { ...this.config.reputation.weights, ...config.reputation?.weights },
 					destinationWeights: {
 						...this.config.reputation.destinationWeights,
@@ -86,15 +86,15 @@ export class Mrrowisp {
 				return candidate;
 			}
 		}
-		throw new Error(`mrrowisp: no available port at or above ${port}`);
+		throw new Error(`wispurr: no available port at or above ${port}`);
 	}
 
 	async start(count: number = 1) {
 		if (!Number.isInteger(count) || count < 1) {
-			throw new RangeError("mrrowisp: worker count must be a positive integer");
+			throw new RangeError("wispurr: worker count must be a positive integer");
 		}
 		if (this.processes?.length) {
-			throw new Error("mrrowisp: already running; stop it before starting again");
+			throw new Error("wispurr: already running; stop it before starting again");
 		}
 		this.processes = [];
 		this.processPorts = [];
@@ -105,7 +105,7 @@ export class Mrrowisp {
 				: this.config.port;
 			if (!Number.isInteger(nextPort) || nextPort! < 1 || nextPort! > 65535) {
 				if (this.processes.length) this.signal("SIGKILL");
-				throw new Error("mrrowisp: port must be an integer between 1 and 65535");
+				throw new Error("wispurr: port must be an integer between 1 and 65535");
 			}
 			let port: number;
 			try {
@@ -178,7 +178,7 @@ export class Mrrowisp {
 		const deadline = Date.now() + 10_000;
 		while (Date.now() < deadline) {
 			if (proc.exitCode !== null) {
-				throw new Error(`mrrowisp: worker exited before becoming ready: code ${proc.exitCode})`);
+				throw new Error(`wispurr: worker exited before becoming ready: code ${proc.exitCode})`);
 			}
 			const healthy = await new Promise<boolean>((resolve) => {
 				const healthReq = request({ hostname: "127.0.0.1", port, path: "/health", timeout: 500 }, (res) => {
@@ -192,7 +192,7 @@ export class Mrrowisp {
 			if (healthy) return;
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
-		throw new Error(`mrrowisp: worker on port ${port} did not become ready within 10 seconds`);
+		throw new Error(`wispurr: worker on port ${port} did not become ready within 10 seconds`);
 	}
 
 	private nextPort(): number | null {
@@ -208,7 +208,7 @@ export class Mrrowisp {
 	route(req: IncomingMessage, socket: Socket, head: Buffer) {
 		const port = this.nextPort();
 		if (port === null) {
-			this.logger.error("mrrowisp is not running");
+			this.logger.error("wispurr is not running");
 			socket.destroy();
 			return;
 		}
@@ -265,11 +265,11 @@ export class Mrrowisp {
 
 	async stop(timeoutMs = 10_000): Promise<void> {
 		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-			throw new RangeError("mrrowisp: stop timeout must be a positive number");
+			throw new RangeError("wispurr: stop timeout must be a positive number");
 		}
 		const workers = this.processes ? [...this.processes] : [];
 		if (workers.length === 0) {
-			this.logger.warn("mrrowisp is not running");
+			this.logger.warn("wispurr is not running");
 			return;
 		}
 
@@ -302,7 +302,7 @@ export class Mrrowisp {
 			this.processes = undefined;
 			this.processPorts = [];
 		} else {
-			this.logger.warn("mrrowisp is not running");
+			this.logger.warn("wispurr is not running");
 		}
 	}
 }

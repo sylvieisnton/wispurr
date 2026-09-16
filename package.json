@@ -1,8 +1,8 @@
 {
-	"name": "mrrowisp",
+	"name": "wispurr",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/sylvieisnton/mrrowisp.git"
+		"url": "git+https://github.com/sylvieisnton/wispurr.git"
 	},
 	"version": "3.9.9",
 	"module": "index.ts",

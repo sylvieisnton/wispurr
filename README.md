@@ -1,10 +1,10 @@
-# mrrowisp
+# wispurr
 
 A [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) server written in Go,
 with a Node.js wrapper for spawning and load-balancing across multiple
 worker processes.
 
-mrrowisp supports Wisp v1, v2, and optionally Twisp (PTY over Wisp). It includes
+wispurr supports Wisp v1, v2, and optionally Twisp (PTY over Wisp). It includes
 flood protection, per-source/per-destination rate limiting, IP scoring, an egress
 allow/deny policy, a DNS cache, and reverse-proxy IP parsing.
 
@@ -30,7 +30,7 @@ allow/deny policy, a DNS cache, and reverse-proxy IP parsing.
 Requires Go 1.25+.
 
 ```sh
-go build -o mrrowisp main.go
+go build -o wispurr main.go
 ```
 
 Or build cross-platform binaries into `./bin/`:
@@ -42,20 +42,20 @@ Or build cross-platform binaries into `./bin/`:
 ### Docker
 
 ```sh
-docker build -t mrrowisp .
-docker run -p 6001:6001 -v $(pwd)/config.json:/app/config.json mrrowisp
+docker build -t wispurr .
+docker run -p 6001:6001 -v $(pwd)/config.json:/app/config.json wispurr
 ```
 
 ### npm / pnpm (Node.js wrapper)
 
 ```sh
-pnpm install mrrowisp
+pnpm install wispurr
 ```
 
 ## Running the standalone server
 
 ```sh
-./mrrowisp --config config.json
+./wispurr --config config.json
 ```
 
 Flags:
@@ -71,14 +71,14 @@ See `example.config.json` for the full list of supported options.
 
 ## Using the Node.js wrapper
 
-The wrapper spawns one or more `mrrowisp` Go processes and the built-in load
+The wrapper spawns one or more `wispurr` Go processes and the built-in load
 balancing routes incoming WebSocket upgrades across them.
 
 ```ts
-import { Mrrowisp } from "mrrowisp";
+import { wispurr } from "wispurr";
 import { createServer } from "node:http";
 
-const wisp = new Mrrowisp({ port: 6001, logLevel: "info" });
+const wisp = new wispurr({ port: 6001, logLevel: "info" });
 await wisp.start(4); // spawn 4 workers, which would route to 6001, 6002, 6003, and 6004 or similar automatically
 
 const server = createServer();
@@ -88,7 +88,7 @@ server.listen(8080);
 
 API:
 
-- `new Mrrowisp(partialConfig?)` – overrides merged onto defaults loaded from
+- `new wispurr(partialConfig?)` – overrides merged onto defaults loaded from
   `dist/config.json`
 - `start(count = 1)` – spawn N worker processes, each on its own port
 - `route(req, socket, head)` – proxy a WebSocket upgrade to the next worker
@@ -117,7 +117,7 @@ keys:
 
 ## Credits
 
-- [soap phia](https://github.com/sylvieisnton/) – Writing mrrowisp
+- [soap phia](https://github.com/sylvieisnton/) – Writing wispurr
 - [Amplify](https://github.com/not-amplify/) – Adding protections against flooding
 
 ## License

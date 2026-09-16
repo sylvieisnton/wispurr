@@ -26,7 +26,7 @@
 	"parseRealIP": true,
 	"trustedProxies": ["127.0.0.1"],
 	"trustedHeaders": ["CF-Connecting-IP", "X-Forwarded-For"],
-	"nonWSResponse": "mrrowisp high-throughput relay",
+	"nonWSResponse": "wispurr high-throughput relay",
 	"logLevel": "error",
 	"proxy": "",
 	"maxMessageSize": 1048581,
@@ -53,7 +53,7 @@
 	},
 	"reputation": {
 		"enabled": false,
-		"storePath": "./data/mrrowisp-reputation.json",
+		"storePath": "./data/wispurr-reputation.json",
 		"saveIntervalSeconds": 30,
 		"scoreDecayPerHour": 1,
 		"evictAfterDays": 7,

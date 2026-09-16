@@ -53,7 +53,7 @@
 	},
 	"reputation": {
 		"enabled": true,
-		"storePath": "./data/mrrowisp-reputation.json",
+		"storePath": "./data/wispurr-reputation.json",
 		"saveIntervalSeconds": 15,
 		"scoreDecayPerHour": 1,
 		"evictAfterDays": 14,

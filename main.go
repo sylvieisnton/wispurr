@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"mrrowisp/wisp"
+	"wispurr/wisp"
 )
 
 func main() {
@@ -50,7 +50,7 @@ func main() {
 
 	wispHandler, err := wisp.NewWispHandler(wispConfig)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Failed to initialize mrrowisp: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] Failed to initialize wispurr: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -72,7 +72,7 @@ func main() {
 	} else {
 		mux.HandleFunc("/", wispHandler)
 	}
-	fmt.Printf("[INFO] Starting Mrrowisp on port %d. . .\n", cfg.Port)
+	fmt.Printf("[INFO] Starting wispurr on port %d. . .\n", cfg.Port)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           mux,
@@ -98,6 +98,6 @@ func main() {
 	err = server.ListenAndServe()
 	wispConfig.Shutdown()
 	if err != nil && err != http.ErrServerClosed {
-		fmt.Printf("[INFO] Failed to start Mrrowisp: %v", err)
+		fmt.Printf("[INFO] Failed to start wispurr: %v", err)
 	}
 }

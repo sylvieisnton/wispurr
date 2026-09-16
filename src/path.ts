@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
 
-const bin = os.platform() === "win32" ? "mrrowisp.exe" : "mrrowisp";
+const bin = os.platform() === "win32" ? "wispurr.exe" : "wispurr";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");

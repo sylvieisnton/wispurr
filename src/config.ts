@@ -34,7 +34,7 @@ export type ReputationConfig = {
 	destinationWeights?: Record<string, number>;
 };
 
-export type MrrowispConfig = {
+export type wispurrConfig = {
 	port: number | number[];
 	allowTCP: boolean;
 	allowUDP: boolean;
@@ -74,7 +74,7 @@ export type MrrowispConfig = {
 	reputation: ReputationConfig;
 };
 
-export type MrrowispOptions = Omit<Partial<MrrowispConfig>, "blacklist" | "whitelist" | "floodProtection" | "reputation"> & {
+export type wispurrOptions = Omit<Partial<wispurrConfig>, "blacklist" | "whitelist" | "floodProtection" | "reputation"> & {
 	blacklist?: Partial<FilterList>;
 	whitelist?: Partial<FilterList>;
 	floodProtection?: Partial<Omit<FloodProtectionConfig, "synFloodSignature">> & {

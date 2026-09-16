@@ -27,8 +27,8 @@ for os in linux darwin win32; do
             ext=""
         fi
         mkdir -p bin/${os}-${arch}
-        GOOS=$goos GOARCH=$goarch go build -o ./bin/${os}-${arch}/mrrowisp${ext} main.go
-        chmod +x ./bin/${os}-${arch}/mrrowisp${ext}
+        GOOS=$goos GOARCH=$goarch go build -o ./bin/${os}-${arch}/wispurr${ext} main.go
+        chmod +x ./bin/${os}-${arch}/wispurr${ext}
     done
 done
 

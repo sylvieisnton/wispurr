@@ -7,18 +7,18 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o mrrowisp main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o wispurr main.go
 
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates && addgroup -S mrrowisp && adduser -S mrrowisp -G mrrowisp
+RUN apk --no-cache add ca-certificates && addgroup -S wispurr && adduser -S wispurr -G wispurr
 
 WORKDIR /app
 
-COPY --from=builder /app/mrrowisp .
+COPY --from=builder /app/wispurr .
 
-USER mrrowisp
+USER wispurr
 
 EXPOSE 6001
 
-CMD ["./mrrowisp", "-config", "config.json"]
+CMD ["./wispurr", "-config", "config.json"]

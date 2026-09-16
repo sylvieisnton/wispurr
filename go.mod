@@ -1,4 +1,4 @@
-module mrrowisp
+module wispurr
 
 go 1.25.0
 
