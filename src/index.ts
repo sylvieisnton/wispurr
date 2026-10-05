@@ -45,6 +45,11 @@ export class wispurr {
 		return [...this.processPorts];
 	}
 
+	private get workerHost(): string {
+		const host = this.config.host;
+		return !host || host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+	}
+
 	constructor(config?: wispurrOptions) {
 		this.config = structuredClone(loadDefaultConfig());
 		this.processes = undefined;
@@ -114,13 +119,11 @@ export class wispurr {
 				if (this.processes.length) this.signal("SIGKILL");
 				throw err;
 			}
-			const { port: _port, ...config } = this.config;
+			const { port: _port, host, ...config } = this.config;
+			const args = ["--config", JSON.stringify(config), "--port", port.toString()];
+			if (host) args.push("--host", host);
 
-			const proc = spawn(
-				binPath,
-				["--config", JSON.stringify(config), "--port", port.toString()],
-				{ stdio: "pipe" },
-			);
+			const proc = spawn(binPath, args, { stdio: "pipe" });
 			await new Promise<void>((resolve, reject) => {
 				proc.once("spawn", resolve);
 				proc.once("error", reject);
@@ -181,7 +184,7 @@ export class wispurr {
 				throw new Error(`wispurr: worker exited before becoming ready: code ${proc.exitCode})`);
 			}
 			const healthy = await new Promise<boolean>((resolve) => {
-				const healthReq = request({ hostname: "127.0.0.1", port, path: "/health", timeout: 500 }, (res) => {
+				const healthReq = request({ hostname: this.workerHost, port, path: "/health", timeout: 500 }, (res) => {
 					res.resume();
 					resolve(res.statusCode === 200);
 				});
@@ -214,7 +217,7 @@ export class wispurr {
 		}
 
 		const proxyReq = request({
-			hostname: "127.0.0.1",
+			hostname: this.workerHost,
 			port,
 			path: req.url,
 			method: req.method,

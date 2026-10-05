@@ -4,7 +4,7 @@
 		"type": "git",
 		"url": "git+https://github.com/sylvieisnton/wispurr.git"
 	},
-	"version": "4.2.0",
+	"version": "4.2.1",
 	"module": "index.ts",
 	"type": "module",
 	"author": "sylvieisnton",
@@ -12,6 +12,18 @@
 	"private": false,
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./vite": {
+			"types": "./dist/vite.d.ts",
+			"default": "./dist/vite.js"
+		},
+		"./package.json": "./package.json",
+		"./dist/*": "./dist/*"
+	},
 	"devDependencies": {
 		"@types/node": "^25.5.0"
 	},

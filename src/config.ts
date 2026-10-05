@@ -36,6 +36,7 @@ export type ReputationConfig = {
 
 export type wispurrConfig = {
 	port: number | number[];
+	host?: string;
 	allowTCP: boolean;
 	allowUDP: boolean;
 	allowDirectIP: boolean;

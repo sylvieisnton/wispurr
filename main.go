@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 func main() {
 	fConfig := flag.String("config", "", "config to load (file or json string)")
 	fPort := flag.Int("port", 0, "port to run on")
+	fHost := flag.String("host", "", "address to bind to")
 	fAllowLoopbackIPs := flag.Bool("allow-loopback", false, "allow loopback IP targets")
 	flag.Parse()
 	setFlags := map[string]bool{}
@@ -74,7 +77,7 @@ func main() {
 	}
 	fmt.Printf("[INFO] Starting wispurr on port %d. . .\n", cfg.Port)
 	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Addr:              net.JoinHostPort(*fHost, strconv.Itoa(cfg.Port)),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
