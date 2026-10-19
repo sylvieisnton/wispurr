@@ -1,6 +1,7 @@
 src/
 wisp/
 build.sh
+scripts/
 go.*
 *.go
 ./wispurr

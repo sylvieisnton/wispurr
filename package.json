@@ -4,7 +4,7 @@
 		"type": "git",
 		"url": "git+https://github.com/sylvieisnton/wispurr.git"
 	},
-	"version": "4.2.1",
+	"version": "4.2.2",
 	"module": "index.ts",
 	"type": "module",
 	"author": "sylvieisnton",
@@ -36,6 +36,6 @@
 	},
 	"scripts": {
 		"compile": "tsc",
-		"build": "pnpm run compile && chmod +x ./build.sh && ./build.sh"
+		"build": "npm run compile && node scripts/build.mjs"
 	}
 }

@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -42,10 +42,71 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      - name: Pack npm package
+        run: npm pack
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: wispurr-*.tgz
+
+      - name: Archive standalone binaries
+        run: |
+          for directory in bin/*; do
+            tar -czf "$directory.tar.gz" -C "$directory" .
+          done
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/*.tar.gz
+
+  smoke:
+    needs: build
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+      - name: Test installed npm package
+        shell: bash
+        run: |
+          package_test_dir=$(mktemp -d)
+          cp scripts/smoke-package.mjs "$package_test_dir/"
+          cp wispurr-*.tgz "$package_test_dir/"
+          cd "$package_test_dir"
+          npm install ./wispurr-*.tgz --ignore-scripts --omit=peer
+          node smoke-package.mjs
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: bin
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "bin/*"
-
-      - name: Publish
-        run: npm publish
+          files: "bin/*.tar.gz"
+      - name: Publish tested package
+        run: npm publish wispurr-*.tgz
