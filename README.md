@@ -117,9 +117,9 @@ keys:
 
 ## Credits
 
-- [soap phia](https://github.com/sylvieisnton/) – Writing wispurr
+- [Sylvia Calabrese](https://github.com/sylvieisnton/) – Writing wispurr
 - [Amplify](https://github.com/not-amplify/) – Adding protections against flooding
 
 ## License
 
-BSD-3-Clause. See [LICENSE](./LICENSE).
+Copyright (C) 2026 Sylvia Calabrese. Licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).

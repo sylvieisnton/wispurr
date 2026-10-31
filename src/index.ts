@@ -153,10 +153,12 @@ export class wispurr {
 			if (proc.stderr) createInterface({ input: proc.stderr }).on("line", handleLine);
 			proc.on("error", (err) => this.logger.error(`worker ${i} error: ${err.message}`));
 
-			proc.on("close", (code) => {
-				this.logger.info(`child process ${i} exited with code ${code}`);
+			proc.on("close", (code, signal) => {
+				const message = `child process ${i} exited with code ${code}, signal ${signal ?? "none"}`;
+				if (code === 0 || signal === "SIGTERM") this.logger.info(message);
+				else this.logger.error(message);
 				if (this.processes) {
-					const idx = this.processes.findIndex((p) => p.index === i);
+					const idx = this.processes.findIndex((p) => p.process === proc);
 					if (idx !== -1) {
 						this.processes.splice(idx, 1);
 						this.processPorts.splice(idx, 1);
@@ -180,8 +182,8 @@ export class wispurr {
 	private async waitForWorker(port: number, proc: ChildProcess): Promise<void> {
 		const deadline = Date.now() + 10_000;
 		while (Date.now() < deadline) {
-			if (proc.exitCode !== null) {
-				throw new Error(`wispurr: worker exited before becoming ready: code ${proc.exitCode})`);
+			if (proc.exitCode !== null || proc.signalCode !== null) {
+				throw new Error(`wispurr: worker exited before becoming ready: code ${proc.exitCode}, signal ${proc.signalCode ?? "none"}`);
 			}
 			const healthy = await new Promise<boolean>((resolve) => {
 				const healthReq = request({ hostname: this.workerHost, port, path: "/health", timeout: 500 }, (res) => {
@@ -223,8 +225,25 @@ export class wispurr {
 			method: req.method,
 			headers: req.headers,
 		});
+		let upstream: Socket | undefined;
+		socket.on("error", () => {
+			proxyReq.destroy();
+			upstream?.destroy();
+			socket.destroy();
+		});
+		socket.once("close", () => {
+			proxyReq.destroy();
+			upstream?.destroy();
+		});
 
 		proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+			upstream = proxySocket;
+			proxySocket.on("error", () => socket.destroy());
+			proxySocket.once("close", () => socket.destroy());
+			if (socket.destroyed) {
+				proxySocket.destroy();
+				return;
+			}
 			socket.write(
 				`HTTP/1.1 101 Switching Protocols\r\n` +
 				Object.entries(proxyRes.headers)
@@ -239,14 +258,14 @@ export class wispurr {
 			proxySocket.pipe(socket);
 			socket.pipe(proxySocket);
 
-			proxySocket.on("error", () => socket.destroy());
-			socket.on("error", () => proxySocket.destroy());
 		});
 		proxyReq.setTimeout(10_000, () => {
 			proxyReq.destroy(new Error("worker upgrade timed out"));
 		});
 
 		proxyReq.on("response", (proxyRes) => {
+			proxyRes.on("error", () => socket.destroy());
+			proxyRes.once("aborted", () => socket.destroy());
 			const status = proxyRes.statusCode ?? 502;
 			const reason = proxyRes.statusMessage ?? "Bad Gateway";
 			const headers = Object.entries(proxyRes.headers)
