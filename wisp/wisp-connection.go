@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -14,10 +15,11 @@ var connIDCounter uint64
 const streamCacheSize = 256
 
 func (c *wispConnection) maxPendingQueueBytes() int {
+	limit := defaultPendingQueueBytes
 	if c != nil && c.config != nil && c.config.PendingQueueSize > 0 {
-		return c.config.PendingQueueSize
+		limit = c.config.PendingQueueSize
 	}
-	return defaultPendingQueueBytes
+	return min(limit, pendingQueueHardCap)
 }
 
 func (c *wispConnection) close() {
@@ -27,7 +29,16 @@ func (c *wispConnection) close() {
 	c.netConn.Close()
 	close(c.closeCh)
 
+	c.ingressMutex.Lock()
+	if c.ingressCond != nil {
+		c.ingressCond.Broadcast()
+	}
+	c.ingressMutex.Unlock()
+
 	c.pendingMutex.Lock()
+	if c.writeCond != nil {
+		c.writeCond.Broadcast()
+	}
 	pending := c.pendingWrites
 	c.pendingWrites = nil
 	c.pendingBytes = 0
@@ -60,6 +71,9 @@ func (c *wispConnection) runWriter() {
 			batchBytes += len(r.data)
 		}
 		c.pendingBytes -= batchBytes
+		if c.writeCond != nil {
+			c.writeCond.Broadcast()
+		}
 		c.pendingMutex.Unlock()
 
 		if cap(bufs) < len(batch) {
@@ -111,7 +125,13 @@ func (c *wispConnection) submitWrite(req writeReq) {
 		return
 	}
 	c.pendingMutex.Lock()
-	if c.pendingBytes+len(req.data) > c.maxPendingQueueBytes() {
+	if c.writeCond == nil {
+		c.writeCond = sync.NewCond(&c.pendingMutex)
+	}
+	for !c.isClosed.Load() && c.pendingBytes > 0 && c.pendingBytes+len(req.data) > c.maxPendingQueueBytes() {
+		c.writeCond.Wait()
+	}
+	if c.isClosed.Load() {
 		c.pendingMutex.Unlock()
 		if req.buf != nil {
 			c.config.ReadBufPool.Put(req.buf)
@@ -119,7 +139,6 @@ func (c *wispConnection) submitWrite(req writeReq) {
 		if req.done != nil {
 			req.done <- net.ErrClosed
 		}
-		c.close()
 		return
 	}
 	c.pendingWrites = append(c.pendingWrites, req)
@@ -131,6 +150,32 @@ func (c *wispConnection) submitWrite(req writeReq) {
 	c.writeActive = true
 	c.pendingMutex.Unlock()
 	go c.runWriter()
+}
+
+func (c *wispConnection) reserveIngress(size int, stream *wispStream) bool {
+	c.ingressMutex.Lock()
+	if c.ingressCond == nil {
+		c.ingressCond = sync.NewCond(&c.ingressMutex)
+	}
+	for !c.isClosed.Load() && stream.ingressActive.Load() && stream.isOpen.Load() && c.ingressPendingBytes > 0 && c.ingressPendingBytes+size > c.maxPendingQueueBytes() {
+		c.ingressCond.Wait()
+	}
+	if c.isClosed.Load() || !stream.ingressActive.Load() || !stream.isOpen.Load() {
+		c.ingressMutex.Unlock()
+		return false
+	}
+	c.ingressPendingBytes += size
+	c.ingressMutex.Unlock()
+	return true
+}
+
+func (c *wispConnection) releaseIngress(size int) {
+	c.ingressMutex.Lock()
+	c.ingressPendingBytes -= size
+	if c.ingressCond != nil {
+		c.ingressCond.Broadcast()
+	}
+	c.ingressMutex.Unlock()
 }
 
 func (c *wispConnection) queueWrite(data []byte) {
@@ -209,11 +254,13 @@ func (c *wispConnection) handleConnectPacket(streamId uint32, payload []byte) {
 	stream := &wispStream{
 		wispConn:       c,
 		streamId:       streamId,
+		streamType:     streamType,
 		connReady:      make(chan struct{}),
 		hostname:       strings.ToLower(strings.TrimSpace(hostname)),
 		portNum:        int(portU16),
 		pendingIngress: make([]ingressJob, 0, 16),
 	}
+	stream.bufferRemaining.Store(c.config.BufferRemainingLength)
 	stream.isOpen.Store(true)
 
 	if _, loaded := c.streams.LoadOrStore(streamId, stream); loaded {
@@ -305,6 +352,23 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 		return false
 	}
 
+	if stream.streamType == streamTypeTCP {
+		for {
+			current := stream.bufferRemaining.Load()
+			next := current - 1
+			refill := current == 1
+			if refill {
+				next = c.config.BufferRemainingLength
+			}
+			if stream.bufferRemaining.CompareAndSwap(current, next) {
+				if refill {
+					c.sendPacket(streamId, next)
+				}
+				break
+			}
+		}
+	}
+
 	if !stream.connReadyDone.Load() {
 		stream.pendingMutex.Lock()
 		if !stream.connReadyDone.Load() {
@@ -327,11 +391,6 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 		if !stream.queueIngressOwned(payload, bufp) {
 			return true
 		}
-		stream.bufferRemaining--
-		if stream.bufferRemaining == 0 {
-			stream.bufferRemaining = c.config.BufferRemainingLength
-			c.sendPacket(streamId, stream.bufferRemaining)
-		}
 		return true
 	}
 
@@ -339,14 +398,6 @@ func (c *wispConnection) handleDataPacket(streamId uint32, payload []byte, bufp 
 	if err != nil {
 		stream.close(closeReasonNetworkError)
 		return false
-	}
-
-	if stream.streamType == streamTypeTCP {
-		stream.bufferRemaining--
-		if stream.bufferRemaining == 0 {
-			stream.bufferRemaining = c.config.BufferRemainingLength
-			c.sendPacket(streamId, stream.bufferRemaining)
-		}
 	}
 	return false
 }

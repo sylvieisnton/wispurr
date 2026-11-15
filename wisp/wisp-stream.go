@@ -2,10 +2,12 @@ package wisp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -200,9 +202,6 @@ func (s *wispStream) handleConnect(streamType uint8, port string, hostname strin
 		synAcquired = true
 	}
 
-	s.streamType = streamType
-	s.bufferRemaining = cfg.BufferRemainingLength
-
 	destination := net.JoinHostPort(resolvedHostname, port)
 
 	var err error
@@ -267,32 +266,37 @@ func (s *wispStream) handleConnect(streamType uint8, port string, hostname strin
 	}
 
 	if s.wispConn.streamConfirm && streamType == streamTypeTCP {
-		s.wispConn.sendPacket(s.streamId, s.bufferRemaining)
+		s.wispConn.sendPacket(s.streamId, s.bufferRemaining.Load())
 	}
 
-	s.pendingMutex.Lock()
-	pending := s.pendingData
-	s.pendingData = nil
-	s.pendingBytes = 0
-	s.pendingMutex.Unlock()
-
-	for _, data := range pending {
-		if !s.isOpen.Load() {
-			return
-		}
-		if err := writeAll(s.conn, data); err != nil {
-			s.close(closeReasonNetworkError)
-			return
-		}
+	if err := s.flushPending(); err != nil {
+		s.close(closeReasonNetworkError)
+		return
 	}
-
-	if streamType == streamTypeTCP {
-		s.ingressActive.Store(true)
-	}
-
-	s.signalConnReady()
 
 	s.readFromConnection()
+}
+
+func (s *wispStream) flushPending() error {
+	s.pendingMutex.Lock()
+	defer s.pendingMutex.Unlock()
+
+	for _, data := range s.pendingData {
+		if !s.isOpen.Load() {
+			return net.ErrClosed
+		}
+		if err := writeAll(s.conn, data); err != nil {
+			return err
+		}
+	}
+	s.pendingData = nil
+	s.pendingBytes = 0
+
+	if s.streamType == streamTypeTCP {
+		s.ingressActive.Store(true)
+	}
+	s.signalConnReady()
+	return nil
 }
 
 func (s *wispStream) runIngressWriter() {
@@ -331,6 +335,7 @@ func (s *wispStream) runIngressWriter() {
 			for i := range jobs {
 				releaseIngressJob(jobs[i])
 			}
+			s.wispConn.releaseIngress(batchBytes)
 			s.pendingIngMu.Lock()
 			s.ingressWriting = false
 			s.pendingIngMu.Unlock()
@@ -346,6 +351,7 @@ func (s *wispStream) runIngressWriter() {
 		for i := range jobs {
 			releaseIngressJob(jobs[i])
 		}
+		s.wispConn.releaseIngress(batchBytes)
 		if err != nil {
 			s.pendingIngMu.Lock()
 			s.ingressWriting = false
@@ -361,15 +367,20 @@ func (s *wispStream) submitIngress(job ingressJob) bool {
 		releaseIngressJob(job)
 		return false
 	}
-	s.pendingIngMu.Lock()
-	if s.pendingIngBytes+len(job.payload) > s.wispConn.maxPendingQueueBytes() {
-		s.pendingIngMu.Unlock()
+	size := len(job.payload)
+	if !s.wispConn.reserveIngress(size, s) {
 		releaseIngressJob(job)
-		s.close(closeReasonThrottled)
+		return false
+	}
+	s.pendingIngMu.Lock()
+	if !s.ingressActive.Load() || !s.isOpen.Load() {
+		s.pendingIngMu.Unlock()
+		s.wispConn.releaseIngress(size)
+		releaseIngressJob(job)
 		return false
 	}
 	s.pendingIngress = append(s.pendingIngress, job)
-	s.pendingIngBytes += len(job.payload)
+	s.pendingIngBytes += size
 	if s.ingressWriting {
 		s.pendingIngMu.Unlock()
 		return true
@@ -483,11 +494,19 @@ func (s *wispStream) close(reason uint8) {
 		s.pendingIngress = nil
 		s.pendingIngBytes = 0
 		s.pendingIngMu.Unlock()
+		drainedBytes := 0
 		for _, j := range drained {
+			drainedBytes += len(j.payload)
 			releaseIngressJob(j)
 		}
+		s.wispConn.releaseIngress(drainedBytes)
 	}
 
+	s.wispConn.ingressMutex.Lock()
+	if s.wispConn.ingressCond != nil {
+		s.wispConn.ingressCond.Broadcast()
+	}
+	s.wispConn.ingressMutex.Unlock()
 	s.wispConn.sendClosePacket(s.streamId, reason)
 }
 
@@ -495,10 +514,23 @@ func mapDialError(err error) uint8 {
 	if err == nil {
 		return closeReasonUnspecified
 	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return closeReasonConnectionRefused
+	}
+	if errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
+		return closeReasonUnreachable
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return closeReasonUnreachable
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return closeReasonTimeout
+	}
 
 	errStr := err.Error()
-
-	if strings.Contains(errStr, "connection refused") {
+	if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "actively refused") {
 		return closeReasonConnectionRefused
 	}
 	if strings.Contains(errStr, "no such host") || strings.Contains(errStr, "no address") {

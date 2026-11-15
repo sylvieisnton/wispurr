@@ -166,6 +166,11 @@ type wispConnection struct {
 	pendingWrites []writeReq
 	pendingBytes  int
 	writeActive   bool
+	writeCond     *sync.Cond
+
+	ingressMutex        sync.Mutex
+	ingressCond         *sync.Cond
+	ingressPendingBytes int
 
 	isV2          bool
 	handshakeDone chan struct{}
@@ -193,7 +198,7 @@ type wispStream struct {
 	streamId        uint32
 	streamType      uint8
 	conn            net.Conn
-	bufferRemaining uint32
+	bufferRemaining atomic.Uint32
 	hostname        string
 	portNum         int
 

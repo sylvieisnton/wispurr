@@ -2,6 +2,7 @@ package wisp
 
 const (
 	defaultPendingQueueBytes = 64 * 1024 * 1024
+	pendingQueueHardCap      = 8 * 1024 * 1024
 
 	packetTypeConnect  uint8 = 0x01
 	packetTypeData     uint8 = 0x02
